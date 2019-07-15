@@ -140,7 +140,8 @@ func testClient_Do(t *testing.T, body interface{}) {
 	retryCount := -1
 
 	// Create the client. Use short retry windows.
-	client := NewClient()
+	c := &http.Client{}
+	client := NewClient(c)
 	client.RetryWaitMin = 10 * time.Millisecond
 	client.RetryWaitMax = 50 * time.Millisecond
 	client.RetryMax = 50
@@ -255,7 +256,8 @@ func TestClient_Do_fails(t *testing.T) {
 	defer ts.Close()
 
 	// Create the client. Use short retry windows so we fail faster.
-	client := NewClient()
+	c := &http.Client{}
+	client := NewClient(c)
 	client.RetryWaitMin = 10 * time.Millisecond
 	client.RetryWaitMax = 10 * time.Millisecond
 	client.RetryMax = 2
@@ -286,7 +288,9 @@ func TestClient_Get(t *testing.T) {
 	defer ts.Close()
 
 	// Make the request.
-	resp, err := NewClient().Get(ts.URL + "/foo/bar")
+	c := &http.Client{}
+	client := NewClient(c)
+	resp, err := client.Get(ts.URL + "/foo/bar")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -308,7 +312,9 @@ func TestClient_RequestLogHook(t *testing.T) {
 	retries := -1
 	testURIPath := "/foo/bar"
 
-	client := NewClient()
+	c := &http.Client{}
+	client := NewClient(c)
+
 	client.RequestLogHook = func(logger Logger, req *http.Request, retry int) {
 		retries = retry
 
@@ -354,7 +360,8 @@ func TestClient_ResponseLogHook(t *testing.T) {
 
 	buf := new(bytes.Buffer)
 
-	client := NewClient()
+	c := &http.Client{}
+	client := NewClient(c)
 	client.Logger = log.New(buf, "", log.LstdFlags)
 	client.RetryWaitMin = 10 * time.Millisecond
 	client.RetryWaitMax = 10 * time.Millisecond
@@ -413,12 +420,13 @@ func TestClient_RequestWithContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(req.Request.Context())
 	req = req.WithContext(ctx)
 
-	client := NewClient()
+	c := &http.Client{}
+	client := NewClient(c)
 
 	called := 0
-	client.CheckRetry = func(_ context.Context, resp *http.Response, err error) (bool, error) {
+	client.CheckRetry = func(_ context.Context, client *Client, req *Request, resp *http.Response, err error) (bool, error) {
 		called++
-		return DefaultRetryPolicy(req.Request.Context(), resp, err)
+		return DefaultRetryPolicy(req.Request.Context(), client, req, resp, err)
 	}
 
 	cancel()
@@ -439,14 +447,15 @@ func TestClient_CheckRetry(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := NewClient()
+	c := &http.Client{}
+	client := NewClient(c)
 
 	retryErr := errors.New("retryError")
 	called := 0
-	client.CheckRetry = func(_ context.Context, resp *http.Response, err error) (bool, error) {
+	client.CheckRetry = func(_ context.Context, client *Client, req *Request, resp *http.Response, err error) (bool, error) {
 		if called < 1 {
 			called++
-			return DefaultRetryPolicy(context.TODO(), resp, err)
+			return DefaultRetryPolicy(context.TODO(), client, req, resp, err)
 		}
 
 		return false, retryErr
@@ -470,11 +479,12 @@ func TestClient_CheckRetryStop(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := NewClient()
+	c := &http.Client{}
+	client := NewClient(c)
 
 	// Verify that this stops retries on the first try, with no errors from the client.
 	called := 0
-	client.CheckRetry = func(_ context.Context, resp *http.Response, err error) (bool, error) {
+	client.CheckRetry = func(_ context.Context, client *Client, req *Request, resp *http.Response, err error) (bool, error) {
 		called++
 		return false, nil
 	}
@@ -504,7 +514,10 @@ func TestClient_Head(t *testing.T) {
 	defer ts.Close()
 
 	// Make the request.
-	resp, err := NewClient().Head(ts.URL + "/foo/bar")
+	c := &http.Client{}
+	client := NewClient(c)
+
+	resp, err := client.Head(ts.URL + "/foo/bar")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -539,7 +552,10 @@ func TestClient_Post(t *testing.T) {
 	defer ts.Close()
 
 	// Make the request.
-	resp, err := NewClient().Post(
+	c := &http.Client{}
+	client := NewClient(c)
+
+	resp, err := client.Post(
 		ts.URL+"/foo/bar",
 		"application/json",
 		strings.NewReader(`{"hello":"world"}`))
@@ -583,7 +599,10 @@ func TestClient_PostForm(t *testing.T) {
 	}
 
 	// Make the request.
-	resp, err := NewClient().PostForm(ts.URL+"/foo/bar", form)
+	c := &http.Client{}
+	client := NewClient(c)
+
+	resp, err := client.PostForm(ts.URL+"/foo/bar", form)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -646,7 +665,8 @@ func TestBackoff(t *testing.T) {
 func TestClient_BackoffCustom(t *testing.T) {
 	var retries int32
 
-	client := NewClient()
+	c := &http.Client{}
+	client := NewClient(c)
 	client.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) time.Duration {
 		atomic.AddInt32(&retries, 1)
 		return time.Millisecond * 1

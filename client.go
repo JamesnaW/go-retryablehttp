@@ -36,7 +36,7 @@ import (
 	"strings"
 	"time"
 
-	cleanhttp "github.com/hashicorp/go-cleanhttp"
+	"golang.org/x/oauth2"
 )
 
 var (
@@ -47,7 +47,7 @@ var (
 
 	// defaultClient is used for performing requests without explicitly making
 	// a new client. It is purposely private to avoid modifications.
-	defaultClient = NewClient()
+	// defaultClient = NewClient()
 
 	// We need to consume response bodies to maintain http connections, but
 	// limit the size we consume to respReadLimit.
@@ -249,7 +249,7 @@ type ResponseLogHook func(Logger, *http.Response)
 // Client will close any response body when retrying, but if the retry is
 // aborted it is up to the CheckResponse callback to properly close any
 // response body before returning.
-type CheckRetry func(ctx context.Context, resp *http.Response, err error) (bool, error)
+type CheckRetry func(ctx context.Context, c *Client, req *Request, resp *http.Response, err error) (bool, error)
 
 // Backoff specifies a policy for how long to wait between retries.
 // It is called after a failing request to determine the amount of time
@@ -261,6 +261,8 @@ type Backoff func(min, max time.Duration, attemptNum int, resp *http.Response) t
 // to close the body and return an error indicating how many tries were
 // attempted. If overriding this, be sure to close the body if needed.
 type ErrorHandler func(resp *http.Response, err error, numTries int) (*http.Response, error)
+
+type RetryActionPolicy func(c *Client, req *Request) (bool, error)
 
 // Client is used to make HTTP requests. It adds additional functionality
 // like automatic retries to tolerate minor outages.
@@ -289,24 +291,29 @@ type Client struct {
 
 	// ErrorHandler specifies the custom error handler to use, if any
 	ErrorHandler ErrorHandler
+
+	ListOfPolicy map[int]RetryActionPolicy
 }
 
+var DefaultListofPolicy = map[int]RetryActionPolicy{}
+
 // NewClient creates a new Client with default settings.
-func NewClient() *Client {
+func NewClient(c *http.Client) *Client {
 	return &Client{
-		HTTPClient:   cleanhttp.DefaultClient(),
+		HTTPClient:   c,
 		Logger:       log.New(os.Stderr, "", log.LstdFlags),
 		RetryWaitMin: defaultRetryWaitMin,
 		RetryWaitMax: defaultRetryWaitMax,
 		RetryMax:     defaultRetryMax,
 		CheckRetry:   DefaultRetryPolicy,
 		Backoff:      DefaultBackoff,
+		ListOfPolicy: DefaultListofPolicy,
 	}
 }
 
 // DefaultRetryPolicy provides a default callback for Client.CheckRetry, which
 // will retry on connection errors and server errors.
-func DefaultRetryPolicy(ctx context.Context, resp *http.Response, err error) (bool, error) {
+func DefaultRetryPolicy(ctx context.Context, c *Client, req *Request, resp *http.Response, err error) (bool, error) {
 	// do not retry on context.Canceled or context.DeadlineExceeded
 	if ctx.Err() != nil {
 		return false, ctx.Err()
@@ -321,6 +328,11 @@ func DefaultRetryPolicy(ctx context.Context, resp *http.Response, err error) (bo
 	// invalid response codes as well, like 0 and 999.
 	if resp.StatusCode == 0 || (resp.StatusCode >= 500 && resp.StatusCode != 501) {
 		return true, nil
+	}
+
+	// Check with policy user provide
+	if policy, ok := c.ListOfPolicy[resp.StatusCode]; ok {
+		return policy(c, req)
 	}
 
 	return false, nil
@@ -419,7 +431,7 @@ func (c *Client) Do(req *Request) (*http.Response, error) {
 		}
 
 		// Check if we should continue with retries.
-		checkOK, checkErr := c.CheckRetry(req.Context(), resp, err)
+		checkOK, checkErr := c.CheckRetry(req.Context(), c, req, resp, err)
 
 		if err != nil {
 			if c.Logger != nil {
@@ -494,9 +506,9 @@ func (c *Client) drainBody(body io.ReadCloser) {
 }
 
 // Get is a shortcut for doing a GET request without making a new client.
-func Get(url string) (*http.Response, error) {
-	return defaultClient.Get(url)
-}
+// func Get(url string) (*http.Response, error) {
+// 	return defaultClient.Get(url)
+// }
 
 // Get is a convenience helper for doing simple GET requests.
 func (c *Client) Get(url string) (*http.Response, error) {
@@ -508,9 +520,9 @@ func (c *Client) Get(url string) (*http.Response, error) {
 }
 
 // Head is a shortcut for doing a HEAD request without making a new client.
-func Head(url string) (*http.Response, error) {
-	return defaultClient.Head(url)
-}
+// func Head(url string) (*http.Response, error) {
+// 	return defaultClient.Head(url)
+// }
 
 // Head is a convenience method for doing simple HEAD requests.
 func (c *Client) Head(url string) (*http.Response, error) {
@@ -522,9 +534,9 @@ func (c *Client) Head(url string) (*http.Response, error) {
 }
 
 // Post is a shortcut for doing a POST request without making a new client.
-func Post(url, bodyType string, body interface{}) (*http.Response, error) {
-	return defaultClient.Post(url, bodyType, body)
-}
+// func Post(url, bodyType string, body interface{}) (*http.Response, error) {
+// 	return defaultClient.Post(url, bodyType, body)
+// }
 
 // Post is a convenience method for doing simple POST requests.
 func (c *Client) Post(url, bodyType string, body interface{}) (*http.Response, error) {
@@ -538,12 +550,38 @@ func (c *Client) Post(url, bodyType string, body interface{}) (*http.Response, e
 
 // PostForm is a shortcut to perform a POST with form data without creating
 // a new client.
-func PostForm(url string, data url.Values) (*http.Response, error) {
-	return defaultClient.PostForm(url, data)
-}
+// func PostForm(url string, data url.Values) (*http.Response, error) {
+// 	return defaultClient.PostForm(url, data)
+// }
 
 // PostForm is a convenience method for doing simple POST operations using
 // pre-filled url.Values form data.
 func (c *Client) PostForm(url string, data url.Values) (*http.Response, error) {
 	return c.Post(url, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()))
+}
+
+// Default401Policy unauthorized policy not provide an exchange access token.
+// Its just only refresh token
+func Default401Policy(config *oauth2.Config, token *oauth2.Token) func(c *Client, req *Request) (bool, error) {
+	return func(c *Client, req *Request) (bool, error) {
+		if token.RefreshToken == "" {
+			return false, nil
+		}
+		tok, err := config.TokenSource(oauth2.NoContext, token).Token()
+		if err != nil {
+			return true, err
+		}
+		token.AccessToken = tok.AccessToken
+		token.Expiry = tok.Expiry
+		token.RefreshToken = tok.RefreshToken
+		token.TokenType = tok.TokenType
+		token.SetAuthHeader(req.Request)
+		return true, nil
+
+	}
+}
+
+// DefaultPolicy will retry automatically
+func DefaultPolicy(c *Client, req *Request) (bool, error) {
+	return true, nil
 }
