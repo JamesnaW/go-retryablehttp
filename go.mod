@@ -1,4 +1,4 @@
-module github.com/JamesnaW/retry
+module github.com/JamesnaW/go-retryablehttp
 
 go 1.12
 
